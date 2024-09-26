@@ -1,0 +1,2 @@
+[build]
+rustflags = ["-C", "link-args=-Wl,-dynamic-linker,/usr/local/fbcode/platform010/lib/ld.so"]
