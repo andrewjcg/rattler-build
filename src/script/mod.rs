@@ -620,11 +620,11 @@ async fn run_process_with_replacements(
     let stdout = child.stdout.take().expect("Failed to take stdout");
     let stderr = child.stderr.take().expect("Failed to take stderr");
 
-    let stdout_wrapped = normalize_crlf(stdout);
-    let stderr_wrapped = normalize_crlf(stderr);
+    //let stdout = normalize_crlf(stdout);
+    //let stderr = normalize_crlf(stderr);
 
-    let mut stdout_lines = tokio::io::BufReader::new(stdout_wrapped).lines();
-    let mut stderr_lines = tokio::io::BufReader::new(stderr_wrapped).lines();
+    let mut stdout_lines = tokio::io::BufReader::new(stdout).lines();
+    let mut stderr_lines = tokio::io::BufReader::new(stderr).lines();
 
     let mut stdout_log = String::new();
     let mut stderr_log = String::new();
