@@ -4,6 +4,7 @@ use std::{
     io::IsTerminal,
     path::{Path, PathBuf},
     process::{Command, Output},
+    time::{Duration, SystemTime},
 };
 
 use crate::system_tools::{SystemTools, Tool};
@@ -13,6 +14,33 @@ use crate::{
 };
 
 use super::SourceError;
+use reqwest_retry::{policies::ExponentialBackoff, RetryDecision, RetryPolicy};
+
+/// Run the given command with retries.
+pub fn retry_output(
+    command: &mut Command,
+    retry_policy: impl RetryPolicy,
+    should_retry: impl Fn(&Output) -> bool,
+) -> std::io::Result<Output> {
+    let mut current_try = 0;
+    let request_start = SystemTime::now();
+    loop {
+        let output = command.output()?;
+        match retry_policy.should_retry(request_start, current_try) {
+            RetryDecision::DoNotRetry => return Ok(output),
+            RetryDecision::Retry { execute_after } => {
+                if !should_retry(&output) {
+                    return Ok(output);
+                }
+                let sleep_for = execute_after
+                    .duration_since(SystemTime::now())
+                    .unwrap_or(Duration::ZERO);
+                std::thread::sleep(sleep_for);
+            }
+        }
+        current_try += 1;
+    }
+}
 
 /// Fetch the given repository using the host `git` executable.
 pub fn fetch_repo(
@@ -38,7 +66,7 @@ pub fn fetch_repo(
         GitRev::Tag(_) => format!("{0}:{0}", rev),
         _ => format!("{}", rev),
     };
-    let output = command
+    command
         .args([
             // Allow non-fast-forward fetches.
             "--force",
@@ -51,9 +79,21 @@ pub fn fetch_repo(
             url,
             refspec.as_str(),
         ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|_err| SourceError::ValidationFailed)?;
+        .current_dir(repo_path);
+
+    let output = retry_output(
+        &mut command,
+        ExponentialBackoff::builder().build_with_max_retries(3),
+        |output| {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let retry = stderr.contains("Could not read from remote repository.")
+                || stderr.contains("fatal: unable to access");
+            if retry {
+                tracing::warn!("retrying failed to git fetch refs from origin: {}", stderr);
+            }
+            retry
+        },
+    )?;
 
     if !output.status.success() {
         tracing::debug!("Repository fetch for revision {:?} failed!", rev);
@@ -134,10 +174,16 @@ fn git_command(system_tools: &SystemTools, sub_cmd: &str) -> Result<Command, Too
 }
 
 /// Run a git command and log precisely what went wrong.
-fn run_git_command(command: &mut Command) -> Result<Output, SourceError> {
-    let output = command
-        .output()
-        .map_err(|_err| SourceError::GitErrorStr("could not execute git"))?;
+fn run_git_command_with_retry(
+    command: &mut Command,
+    should_retry: impl Fn(&Output) -> bool,
+) -> Result<Output, SourceError> {
+    let output = retry_output(
+        command,
+        ExponentialBackoff::builder().build_with_max_retries(3),
+        should_retry,
+    )
+    .map_err(|_err| SourceError::GitErrorStr("could not execute git"))?;
 
     if !output.status.success() {
         tracing::error!("Command failed: {:?}", command);
@@ -157,6 +203,10 @@ fn run_git_command(command: &mut Command) -> Result<Output, SourceError> {
     }
 
     Ok(output)
+}
+
+fn run_git_command(command: &mut Command) -> Result<Output, SourceError> {
+    run_git_command_with_retry(command, |_| false)
 }
 
 /// Fetch the git repository specified by the given source and place it in the cache directory.
@@ -258,7 +308,15 @@ pub fn git_src(
                     ])
                     .arg(cache_path.as_os_str());
 
-                let _ = run_git_command(&mut command)?;
+                let _ = run_git_command_with_retry(&mut command, |output| {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let retry = stderr.contains("Could not read from remote repository.")
+                        || stderr.contains("fatal: unable to access");
+                    if retry {
+                        tracing::warn!("retrying failed to git clone: {}", stderr);
+                    }
+                    retry
+                })?;
             }
 
             assert!(cache_path.exists());
