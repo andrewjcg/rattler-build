@@ -176,7 +176,8 @@ pub async fn build_reindexed_channels(
                 .map(ToString::to_string)
                 .collect(),
         ),
-    );
+        Default::default(),
+    )?;
 
     let index_config = IndexFsConfig {
         channel: output_dir.clone(),
